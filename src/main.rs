@@ -8,9 +8,30 @@ use fetch::*;
 use parse::generate_solver_params;
 
 supported_solvers! {
+    ALPHAECP => "ALPHAECP";
+    ANTIGONE => "ANTIGONE";
     BARON => "BARON";
+    CBC => "CBC";
+    CONOPT => "CONOPT";
+    CONOPT3 => "CONOPT3";
+    COPT => "COPT";
+    CPLEX => "CPLEX";
+    DECIS => "DECIS";
+    DICOPT => "DICOPT";
     GUROBI => "GUROBI";
     HIGHS => "HIGHS";
+    IPOPT => "IPOPT";
+    KNITRO => "KNITRO";
+    LINDO => "LINDO";
+    MINOS => "MINOS";
+    MOSEK => "MOSEK";
+    ODHCPLEX => "ODHCPLEX";
+    SBB => "SBB";
+    SCIP => "SCIP";
+    SHOT => "SHOT";
+    SNOPT => "SNOPT";
+    SOPLEX => "SOPLEX";
+    XPRESS => "XPRESS";
 }
 
 #[tokio::main]
