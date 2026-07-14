@@ -137,22 +137,6 @@ fn to_snake_case(name: &str) -> String {
     collapsed.trim_matches('_').to_string()
 }
 
-/// Converts a snake_case string into PascalCase, for use as the enum
-/// variant identifier (e.g. `bar_iter_limit` -> `BarIterLimit`).
-fn to_pascal_case(snake: &str) -> String {
-    snake
-        .split('_')
-        .filter(|s| !s.is_empty())
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect()
-}
-
 fn escape_keyword(name: &str) -> String {
     const KEYWORDS: &[&str] = &[
         "as", "async", "await", "break", "const", "continue", "crate", "dyn",
@@ -180,9 +164,16 @@ fn type_kind_str(dt: &Option<DataType>) -> &'static str {
     }
 }
 
-/// Generates the bare `(kind, method, Variant)` tuple lines for a single
-/// solver's options, ready to paste into a `<solver>_params!(...)` macro
-/// invocation. Options with no name are skipped.
+/// Generates the bare `(kind, method, "key")` tuple lines for a single
+/// solver's options, ready to feed a `gams_params!(...)` macro invocation.
+///
+/// - `kind` is `int`/`dbl`/`str`.
+/// - `method` is the snake_case setter name.
+/// - `"key"` is the exact GAMS option name written verbatim to the `.opt` file
+///   (e.g. `limits/gap`, `MSK_IPAR_NUM_THREADS`, `AbsConFeasTol`). It is kept
+///   raw.
+///
+/// Options with no name are skipped.
 pub fn generate_solver_params(options: &[Data]) -> String {
     let mut out = String::new();
 
@@ -193,10 +184,10 @@ pub fn generate_solver_params(options: &[Data]) -> String {
 
         let snake = to_snake_case(raw_name);
         let method = escape_keyword(&snake);
-        let variant = to_pascal_case(&snake);
         let kind = type_kind_str(&data.data_type);
+        let key = raw_name.replace('\\', "\\\\").replace('"', "\\\"");
 
-        out.push_str(&format!("({kind}, {method}, {variant}),\n"));
+        out.push_str(&format!("({kind}, {method}, \"{key}\"),\n"));
     }
 
     out
@@ -278,14 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pascal_case_basic() {
-        assert_eq!(to_pascal_case("bar_iter_limit"), "BarIterLimit");
-        assert_eq!(to_pascal_case("seed"), "Seed");
-        assert_eq!(to_pascal_case("log_file"), "LogFile");
-        assert_eq!(to_pascal_case("mip_optcr"), "MipOptcr");
-    }
-
-    #[test]
     fn test_infer_integer() {
         assert!(matches!(infer_type(&Some("0".into())), Some(DataType::Integer)));
         assert!(matches!(infer_type(&Some("50".into())), Some(DataType::Integer)));
@@ -361,8 +344,8 @@ mod tests {
         let data = parse_solver_options(BASIC_HTML);
         let generated = generate_solver_params(&data);
 
-        assert!(generated.contains("(int, cut_nrcuts, CutNrcuts),"));
-        assert!(generated.contains("(dbl, ecp_beta, EcpBeta),"));
+        assert!(generated.contains("(int, cut_nrcuts, \"CUTnrcuts\"),"));
+        assert!(generated.contains("(dbl, ecp_beta, \"ECPbeta\"),"));
     }
 
     #[test]
@@ -378,7 +361,7 @@ mod tests {
         let data = parse_solver_options(html);
         let generated = generate_solver_params(&data);
 
-        assert!(generated.contains("(int, continue_, Continue),"));
+        assert!(generated.contains("(int, continue_, \"continue\"),"));
     }
 
     #[test]
@@ -394,6 +377,6 @@ mod tests {
         let data = parse_solver_options(html);
         let generated = generate_solver_params(&data);
 
-        assert!(generated.contains("(str, log_file, LogFile),"));
+        assert!(generated.contains("(str, log_file, \"log file\"),"));
     }
 }
