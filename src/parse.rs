@@ -105,18 +105,28 @@ fn to_snake_case(name: &str) -> String {
         if c == '_' {
             result.push('_');
         } else if c.is_uppercase() {
+            let prev_upper = i > 0 && chars[i - 1].is_uppercase();
+            let next_lower = i + 1 < chars.len() && chars[i + 1].is_lowercase();
+
+            // An uppercase run followed by a lowercase word is ambiguous.
+			// GAMS uses both conventions:
+            //   `CUTnrcuts` = tag `CUT` + option `nrcuts` -> cut_nrcuts
+            //   `ISolTol`   = CamelCase words             -> i_sol_tol
+			//
+            // A further uppercase later in the name marks the CamelCase case, so
+            // the word boundary belongs before this letter rather than after
+            // the run.
+            let camel =
+                prev_upper && next_lower && chars[i + 1..].iter().any(|c| c.is_uppercase());
+
             if i > 0 {
                 let prev = chars[i - 1];
-                if prev.is_lowercase() || prev == '_' {
+                if prev.is_lowercase() || prev == '_' || camel {
                     result.push('_');
                 }
             }
             result.push(c.to_ascii_lowercase());
-            if i > 0
-                && i + 1 < chars.len()
-                && chars[i + 1].is_lowercase()
-                && chars[i - 1].is_uppercase()
-            {
+            if prev_upper && next_lower && !camel {
                 result.push('_');
             }
         } else {
@@ -204,6 +214,21 @@ mod tests {
         assert_eq!(to_snake_case("MIPsolver"), "mip_solver");
         assert_eq!(to_snake_case("TOLepsf"), "tol_epsf");
         assert_eq!(to_snake_case("NLPcall"), "nlp_call");
+    }
+
+    #[test]
+    fn test_snake_camel_after_acronym() {
+        assert_eq!(to_snake_case("ISolTol"), "i_sol_tol");
+        assert_eq!(to_snake_case("NLPIterLimit"), "nlp_iter_limit");
+        assert_eq!(to_snake_case("FAPHeurLevel"), "fap_heur_level");
+        assert_eq!(to_snake_case("QMatrixTol"), "q_matrix_tol");
+        assert_eq!(to_snake_case("MipNLPIterLimit"), "mip_nlp_iter_limit");
+    }
+
+    #[test]
+    fn test_snake_tag_form_is_preserved() {
+        assert_eq!(to_snake_case("ExtNLPsolver"), "ext_nlp_solver");
+        assert_eq!(to_snake_case("MIPoptcr"), "mip_optcr");
     }
 
     #[test]
