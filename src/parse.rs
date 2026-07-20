@@ -1,33 +1,138 @@
+use std::collections::HashMap;
+
 use scraper::{Html, Selector};
 
-#[derive(Debug, Clone,)]
-pub enum DataType {
-    Integer,
-    Float,
-    String,
+/// Extra facts about an option, taken from its "detailed description" entry:
+/// `<p><a class="anchor" id=".."></a><b>name</b> <em>(integer)</em>: ...</p>`
+/// followed by a `<blockquote>` that may hold a `value`/`meaning` table.
+///
+/// Not every GAMS solver page has these entries (BARON, CBC, COPT, HiGHS, SCIP,
+/// SHOT and SoPlex publish only the summary table), so both fields are optional.
+#[derive(Debug, Clone, Default)]
+pub struct Detail {
+    /// Declared type: `integer`, `real`, `boolean` or `string`. Authoritative,
+    /// unlike the guess made from the default value.
+    pub declared_type: Option<String>,
+    /// Allowed values when the option enumerates over strings. Numeric-coded
+    /// enumerations are deliberately left out: their `meaning` cells are
+    /// sentences, which make poor identifiers.
+    pub string_values: Vec<String>,
+}
+
+/// A value is usable as an enum variant if it is a non-numeric identifier-ish
+/// token (numeric codes like `0`/`1` are rejected: see [`Detail::string_values`]).
+fn is_enum_token(v: &str) -> bool {
+    !v.is_empty()
+        && v.parse::<f64>().is_err()
+        && v.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+/// Parse the per-option "detailed description" entries into a map keyed by the
+/// exact option name.
+pub fn parse_option_details(html: &str) -> HashMap<String, Detail> {
+    let document = Html::parse_document(html);
+    let p_sel = Selector::parse("p").unwrap();
+    let anchor_sel = Selector::parse("a.anchor").unwrap();
+    let b_sel = Selector::parse("b").unwrap();
+    let em_sel = Selector::parse("em").unwrap();
+    let table_sel = Selector::parse("table.markdownTable").unwrap();
+    let th_sel = Selector::parse("th").unwrap();
+    let tr_sel = Selector::parse("tr").unwrap();
+    let td_sel = Selector::parse("td").unwrap();
+
+    let mut out: HashMap<String, Detail> = HashMap::new();
+
+    for p in document.select(&p_sel) {
+        if p.select(&anchor_sel).next().is_none() {
+            continue;
+        }
+        let Some(name_el) = p.select(&b_sel).next() else {
+            continue;
+        };
+        let name = cell_text(&name_el);
+        if name.is_empty() {
+            continue;
+        }
+
+        let declared_type = p.select(&em_sel).next().map(|e| cell_text(&e)).and_then(|t| {
+            let t = t.trim().trim_start_matches('(').trim_end_matches(')').to_string();
+            matches!(t.as_str(), "integer" | "real" | "boolean" | "string").then_some(t)
+        });
+
+        let mut values: Vec<String> = Vec::new();
+        if let Some(bq) = p
+            .next_siblings()
+            .filter_map(scraper::ElementRef::wrap)
+            .find(|e| e.value().name() == "blockquote")
+        {
+            for table in bq.select(&table_sel) {
+                let heads: Vec<String> =
+                    table.select(&th_sel).map(|th| cell_text(&th).to_lowercase()).collect();
+                if !(heads.iter().any(|h| h == "value") && heads.iter().any(|h| h == "meaning")) {
+                    continue;
+                }
+                for row in table.select(&tr_sel) {
+                    if row.select(&th_sel).count() > 0 {
+                        continue;
+                    }
+                    if let Some(cell) = row.select(&td_sel).next() {
+                        let v = cell_text(&cell);
+                        if !v.is_empty() {
+                            values.push(v);
+                        }
+                    }
+                }
+            }
+        }
+        let string_values =
+            if values.len() >= 2 && values.iter().all(|v| is_enum_token(v)) { values } else { Vec::new() };
+
+        let entry = out.entry(name).or_default();
+        if entry.declared_type.is_none() {
+            entry.declared_type = declared_type;
+        }
+        if entry.string_values.is_empty() {
+            entry.string_values = string_values;
+        }
+    }
+
+    out
+}
+
+/// Pages without detailed entries (HiGHS, SCIP, ...) document a string option's
+/// alternatives inline in its description, e.g.
+/// `LP solver: "choose", "simplex", "ipm", ...` alongside `Range: string`.
+/// Pull the quoted tokens out of those.
+fn inline_string_values(description: Option<&str>) -> Vec<String> {
+    let Some(desc) = description else {
+        return Vec::new();
+    };
+    if !desc.contains("Range: string") {
+        return Vec::new();
+    }
+    let mut values = Vec::new();
+    let mut rest = desc;
+    while let Some(open) = rest.find('"') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('"') else { break };
+        let token = &after[..close];
+        if is_enum_token(token) {
+            values.push(token.to_string());
+        }
+        rest = &after[close + 1..];
+    }
+    values.dedup();
+    if values.len() >= 2 { values } else { Vec::new() }
 }
 
 #[derive(Debug, Clone)]
 pub struct Data {
     pub option: Option<String>,
     pub description: Option<String>,
-    pub default: Option<String>,
-    pub data_type: Option<DataType>,
 }
 
 fn cell_text(el: &scraper::ElementRef) -> String {
     el.text().collect::<String>().trim().to_string()
-}
-
-fn infer_type(v: &Option<String>) -> Option<DataType> {
-    let val = v.as_ref()?;
-    if val.parse::<i64>().is_ok() {
-        Some(DataType::Integer)
-    } else if val.parse::<f64>().is_ok() {
-        Some(DataType::Float)
-    } else {
-        Some(DataType::String)
-    }
 }
 
 fn opt(v: Option<&String>) -> Option<String> {
@@ -77,13 +182,9 @@ pub fn parse_solver_options(html: &str) -> Vec<Data> {
                 continue;
             }
 
-            let default = opt(cells.get(def_idx));
-
             results.push(Data {
                 option: opt(cells.get(opt_idx)),
                 description: opt(cells.get(desc_idx)),
-                data_type: infer_type(&default),
-                default,
             });
         }
     }
@@ -164,16 +265,6 @@ fn escape_keyword(name: &str) -> String {
     }
 }
 
-/// Maps an inferred [`DataType`] to the `kind` tag used by the
-/// `gurobi_params!`-style macro (`int`, `dbl`, `str`).
-fn type_kind_str(dt: &Option<DataType>) -> &'static str {
-    match dt {
-        Some(DataType::Integer) => "int",
-        Some(DataType::Float) => "dbl",
-        Some(DataType::String) | None => "str",
-    }
-}
-
 /// Generates the bare `(kind, method, "key")` tuple lines for a single
 /// solver's options, ready to feed a `gams_params!(...)` macro invocation.
 ///
@@ -184,7 +275,7 @@ fn type_kind_str(dt: &Option<DataType>) -> &'static str {
 ///   raw.
 ///
 /// Options with no name are skipped.
-pub fn generate_solver_params(options: &[Data]) -> String {
+pub fn generate_solver_params(options: &[Data], details: &HashMap<String, Detail>) -> String {
     let mut out = String::new();
 
     for data in options {
@@ -194,10 +285,32 @@ pub fn generate_solver_params(options: &[Data]) -> String {
 
         let snake = to_snake_case(raw_name);
         let method = escape_keyword(&snake);
-        let kind = type_kind_str(&data.data_type);
         let key = raw_name.replace('\\', "\\\\").replace('"', "\\\"");
+        let detail = details.get(raw_name);
 
-        out.push_str(&format!("({kind}, {method}, \"{key}\"),\n"));
+        let kind = match detail.and_then(|d| d.declared_type.as_deref()) {
+            Some("integer") => "int",
+            Some("real") => "dbl",
+            Some("boolean") => "bool",
+            Some("string") => "str",
+            _ => "any",
+        };
+
+        let values = match detail.map(|d| d.string_values.clone()).unwrap_or_default() {
+            v if !v.is_empty() => v,
+            _ => inline_string_values(data.description.as_deref()),
+        };
+
+        if values.is_empty() {
+            out.push_str(&format!("({kind}, {method}, \"{key}\"),\n"));
+        } else {
+            let list = values
+                .iter()
+                .map(|v| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!("({kind}, {method}, \"{key}\", [{list}]),\n"));
+        }
     }
 
     out
@@ -206,6 +319,50 @@ pub fn generate_solver_params(options: &[Data]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DETAIL_HTML: &str = r#"<p><a class="anchor" id="CPLEXmipemphasis"></a><b>mipemphasis</b> <em>(integer)</em>: MIP solution tactics</p><blockquote class="doxtable">
+<p>Default: <code>0</code></p>
+<table class="markdownTable">
+<tr class="markdownTableHead"><th>value   </th><th>meaning    </th></tr>
+<tr><td><code>0</code></td><td>Balance optimality and feasibility</td></tr>
+<tr><td><code>1</code></td><td>Emphasize feasibility</td></tr>
+</table></blockquote>
+<p><a class="anchor" id="MSKoptimizer"></a><b>MSK_IPAR_OPTIMIZER</b> <em>(string)</em>: optimizer</p><blockquote class="doxtable">
+<table class="markdownTable">
+<tr class="markdownTableHead"><th>value   </th><th>meaning    </th></tr>
+<tr><td><code>MSK_OPTIMIZER_FREE</code></td><td>auto</td></tr>
+<tr><td><code>MSK_OPTIMIZER_CONIC</code></td><td>conic</td></tr>
+</table></blockquote>"#;
+
+    #[test]
+    fn test_detail_declared_type_is_captured() {
+        let d = parse_option_details(DETAIL_HTML);
+        assert_eq!(d["mipemphasis"].declared_type.as_deref(), Some("integer"));
+        assert_eq!(d["MSK_IPAR_OPTIMIZER"].declared_type.as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn test_numeric_value_tables_are_not_enums() {
+        // 0/1 codes would make useless variant names, so they are skipped.
+        let d = parse_option_details(DETAIL_HTML);
+        assert!(d["mipemphasis"].string_values.is_empty());
+    }
+
+    #[test]
+    fn test_string_value_tables_become_enums() {
+        let d = parse_option_details(DETAIL_HTML);
+        assert_eq!(
+            d["MSK_IPAR_OPTIMIZER"].string_values,
+            vec!["MSK_OPTIMIZER_FREE", "MSK_OPTIMIZER_CONIC"]
+        );
+    }
+
+    #[test]
+    fn test_inline_string_values_from_description() {
+        let desc = Some("LP solver: \"choose\", \"simplex\", \"ipm\"Range: string");
+        assert_eq!(inline_string_values(desc), vec!["choose", "simplex", "ipm"]);
+        assert!(inline_string_values(Some("uses \"a\", \"b\"")).is_empty());
+    }
 
     #[test]
     fn test_snake_basic_pascal() {
@@ -293,35 +450,6 @@ mod tests {
         assert_eq!(to_snake_case(".both."), "both");
     }
 
-    #[test]
-    fn test_infer_integer() {
-        assert!(matches!(infer_type(&Some("0".into())), Some(DataType::Integer)));
-        assert!(matches!(infer_type(&Some("50".into())), Some(DataType::Integer)));
-        assert!(matches!(infer_type(&Some("-1".into())), Some(DataType::Integer)));
-        assert!(matches!(infer_type(&Some("200".into())), Some(DataType::Integer)));
-    }
-
-    #[test]
-    fn test_infer_float() {
-        assert!(matches!(infer_type(&Some("1.3".into())), Some(DataType::Float)));
-        assert!(matches!(infer_type(&Some("2.0".into())), Some(DataType::Float)));
-        assert!(matches!(infer_type(&Some("1e-3".into())), Some(DataType::Float)));
-        assert!(matches!(infer_type(&Some("1e10".into())), Some(DataType::Float)));
-        assert!(matches!(infer_type(&Some("1e-6".into())), Some(DataType::Float)));
-    }
-
-    #[test]
-    fn test_infer_string() {
-        assert!(matches!(infer_type(&Some("GAMS MIP solver".into())), Some(DataType::String)));
-        assert!(matches!(infer_type(&Some("GAMS optCR".into())), Some(DataType::String)));
-        assert!(matches!(infer_type(&Some("Filename".into())), Some(DataType::String)));
-    }
-
-    #[test]
-    fn test_infer_none() {
-        assert!(infer_type(&None).is_none());
-    }
-
     const BASIC_HTML: &str = r#"<table class="markdownTable">
 <tr class="markdownTableHead">
 <th>Option</th><th>Description</th><th>Default</th>
@@ -350,12 +478,8 @@ mod tests {
 
         assert_eq!(data[0].option.as_deref(), Some("CUTnrcuts"));
         assert_eq!(data[0].description.as_deref(), Some("Cut generation pace"));
-        assert_eq!(data[0].default.as_deref(), Some("0"));
-        assert!(matches!(data[0].data_type, Some(DataType::Integer)));
 
         assert_eq!(data[1].option.as_deref(), Some("ECPbeta"));
-        assert_eq!(data[1].default.as_deref(), Some("1.3"));
-        assert!(matches!(data[1].data_type, Some(DataType::Float)));
     }
 
     #[test]
@@ -367,10 +491,10 @@ mod tests {
     #[test]
     fn test_generate_params_basic() {
         let data = parse_solver_options(BASIC_HTML);
-        let generated = generate_solver_params(&data);
+        let generated = generate_solver_params(&data, &HashMap::new());
 
-        assert!(generated.contains("(int, cut_nrcuts, \"CUTnrcuts\"),"));
-        assert!(generated.contains("(dbl, ecp_beta, \"ECPbeta\"),"));
+        assert!(generated.contains("(any, cut_nrcuts, \"CUTnrcuts\"),"));
+        assert!(generated.contains("(any, ecp_beta, \"ECPbeta\"),"));
     }
 
     #[test]
@@ -384,9 +508,9 @@ mod tests {
 </tr>
 </table>"#;
         let data = parse_solver_options(html);
-        let generated = generate_solver_params(&data);
+        let generated = generate_solver_params(&data, &HashMap::new());
 
-        assert!(generated.contains("(int, continue_, \"continue\"),"));
+        assert!(generated.contains("(any, continue_, \"continue\"),"));
     }
 
     #[test]
@@ -400,8 +524,8 @@ mod tests {
 </tr>
 </table>"#;
         let data = parse_solver_options(html);
-        let generated = generate_solver_params(&data);
+        let generated = generate_solver_params(&data, &HashMap::new());
 
-        assert!(generated.contains("(str, log_file, \"log file\"),"));
+        assert!(generated.contains("(any, log_file, \"log file\"),"));
     }
 }

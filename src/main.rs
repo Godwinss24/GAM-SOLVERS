@@ -51,9 +51,14 @@ async fn main() {
         eprintln!("Fetching: {link}");
 
         match scrape_gams_solvers(&link).await {
-            Ok(data) => {
-                eprintln!("  -> {} options", data.len());
-                let params = generate_solver_params(&data);
+            Ok((data, details)) => {
+                let typed = details.values().filter(|d| d.declared_type.is_some()).count();
+                let enums = details.values().filter(|d| !d.string_values.is_empty()).count();
+                eprintln!(
+                    "  -> {} options ({typed} with a declared type, {enums} enumerated)",
+                    data.len()
+                );
+                let params = generate_solver_params(&data, &details);
                 println!("// {}", solver.url_name());
                 print!("{params}");
             }
