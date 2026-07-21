@@ -193,6 +193,12 @@ pub fn parse_solver_options(html: &str) -> Vec<Data> {
 }
 
 fn to_snake_case(name: &str) -> String {
+    // A name that already marks word boundaries explicitly (`Subsolver.Cplex.
+    // MIPEmphasis`, `Flg_SLPMode`) is written in CamelCase within its segments.
+    // A flat name (`CUTnrcuts`) uses the GAMS tag convention instead. This
+    // decides the ambiguous case below.
+    let structured = name.chars().any(|c| !c.is_alphanumeric());
+
     let sanitized: String = name
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
@@ -214,11 +220,13 @@ fn to_snake_case(name: &str) -> String {
             //   `CUTnrcuts` = tag `CUT` + option `nrcuts` -> cut_nrcuts
             //   `ISolTol`   = CamelCase words             -> i_sol_tol
 			//
-            // A further uppercase later in the name marks the CamelCase case, so
-            // the word boundary belongs before this letter rather than after
-            // the run.
-            let camel =
-                prev_upper && next_lower && chars[i + 1..].iter().any(|c| c.is_uppercase());
+            // Two signals mark the CamelCase case, in which the boundary belongs
+            // before this letter rather than after the run: a further uppercase
+            // later in the name (`ISolTol`), or a name that already separates its
+            // words (`Subsolver.Cplex.MIPEmphasis` -> subsolver_cplex_mip_emphasis).
+            let camel = prev_upper
+                && next_lower
+                && (structured || chars[i + 1..].iter().any(|c| c.is_uppercase()));
 
             if i > 0 {
                 let prev = chars[i - 1];
@@ -380,6 +388,14 @@ mod tests {
         assert_eq!(to_snake_case("FAPHeurLevel"), "fap_heur_level");
         assert_eq!(to_snake_case("QMatrixTol"), "q_matrix_tol");
         assert_eq!(to_snake_case("MipNLPIterLimit"), "mip_nlp_iter_limit");
+    }
+
+    #[test]
+    fn test_snake_camel_in_structured_names() {
+        assert_eq!(to_snake_case("Subsolver.Cplex.MIPEmphasis"), "subsolver_cplex_mip_emphasis");
+        assert_eq!(to_snake_case("Subsolver.Gurobi.MIPFocus"), "subsolver_gurobi_mip_focus");
+        assert_eq!(to_snake_case("Flg_SLPMode"), "flg_slp_mode");
+        assert_eq!(to_snake_case("use_original_HFactor_logic"), "use_original_h_factor_logic");
     }
 
     #[test]
